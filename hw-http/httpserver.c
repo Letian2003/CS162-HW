@@ -31,6 +31,7 @@ char* server_files_directory;
 char* server_proxy_hostname;
 int server_proxy_port;
 
+#define FORKSERVER 1
 /*
  * Serves the contents the file stored at `path` to the client socket `fd`.
  * It is the caller's reponsibility to ensure that the file stored at `path` exists.
@@ -40,33 +41,99 @@ void serve_file(int fd, char* path) {
   /* TODO: PART 2 */
   /* PART 2 BEGIN */
 
-  http_start_response(fd, 200);
-  http_send_header(fd, "Content-Type", http_get_mime_type(path));
-  http_send_header(fd, "Content-Length", "0"); // TODO: change this line too
-  http_end_headers(fd);
+    struct stat statbuf;
+    stat(path, &statbuf);
+    int Content_Length = statbuf.st_size;
+    char length[16];
+    snprintf(length,16,"%d",Content_Length);
+
+    http_start_response(fd, 200);
+    http_send_header(fd, "Content-Type", http_get_mime_type(path));
+    http_send_header(fd, "Content-Length", length); // TODO: change this line too
+    http_end_headers(fd);
+
+
+    char buf[BUFSIZ];
+    memset(buf, 0, BUFSIZ);
+    int filefd = open(path,O_RDONLY);
+
+    int len;
+    while((len = read(filefd,buf,BUFSIZ))>0) {
+        write(fd,buf,len);
+    }
+
+    close(filefd);
+    close(fd);
+
 
   /* PART 2 END */
 }
 
 void serve_directory(int fd, char* path) {
-  http_start_response(fd, 200);
-  http_send_header(fd, "Content-Type", http_get_mime_type(".html"));
-  http_end_headers(fd);
+    http_start_response(fd, 200);
+    http_send_header(fd, "Content-Type", http_get_mime_type(".html"));
+    http_end_headers(fd);
 
-  /* TODO: PART 3 */
-  /* PART 3 BEGIN */
+    /* TODO: PART 3 */
+    /* PART 3 BEGIN */
 
-  // TODO: Open the directory (Hint: opendir() may be useful here)
+    // TODO: Open the directory (Hint: opendir() may be useful here)
 
-  /**
-   * TODO: For each entry in the directory (Hint: look at the usage of readdir() ),
-   * send a string containing a properly formatted HTML. (Hint: the http_format_href()
-   * function in libhttp.c may be useful here)
-   */
+    /**
+      * TODO: For each entry in the directory (Hint: look at the usage of  () ),
+      * send a string containing a properly formatted HTML. (Hint: the http_format_href()
+      * function in libhttp.c may be useful here)
+      */
 
-  /* PART 3 END */
+    char* buffer = malloc(strlen(path)+64);
+
+    http_format_index(buffer,path);
+    struct stat statbuf;
+
+    if(stat(buffer,&statbuf)==0){
+        serve_file(fd,buffer);
+        return;
+    }
+    else{
+        DIR *dir = opendir(path);
+        if(dir==NULL){
+            perror("opendir");
+            exit(-1);
+        }
+        struct dirent* Dirent = (struct dirent*)malloc(sizeof(struct dirent));
+        if(Dirent == NULL){
+            perror("malloc dirent");
+            exit(-1);
+        }
+
+        while((Dirent = readdir(dir))!=NULL){
+            http_format_href(buffer,path,Dirent->d_name);
+            int buffer_len = strlen(buffer);
+            write(fd,buffer,buffer_len);
+            write(fd,"\n",1);
+        }
+        closedir(dir);
+        close(fd);
+    }
+    
+
+    /* PART 3 END */
 }
 
+#ifdef THREADSERVER
+    struct thread_server_args{
+        void (*request_handler)(int);
+        int fd;
+    };
+
+
+static void* thread_server(void *args){
+    struct thread_server_args* arg = (struct thread_server_args*) args;
+    int fd = arg->fd;
+    void (*request_handler)(int) = arg -> request_handler;
+    request_handler(fd);
+}
+#endif
 /*
  * Reads an HTTP request from client socket (fd), and writes an HTTP response
  * containing:
@@ -80,9 +147,11 @@ void serve_directory(int fd, char* path) {
  *
  *   Closes the client socket (fd) when finished.
  */
+
 void handle_files_request(int fd) {
 
   struct http_request* request = http_request_parse(fd);
+
 
   if (request == NULL || request->path[0] != '/') {
     http_start_response(fd, 400);
@@ -99,6 +168,7 @@ void handle_files_request(int fd) {
     close(fd);
     return;
   }
+
 
   /* Remove beginning `./` */
   char* path = malloc(2 + strlen(request->path) + 1);
@@ -117,6 +187,29 @@ void handle_files_request(int fd) {
    */
 
   /* PART 2 & 3 BEGIN */
+
+  /* part 2 */
+    struct stat statbuf;
+
+
+    if(stat(path,&statbuf)) {
+        http_start_response(fd, 404);
+        http_send_header(fd, "Content-Type", "text/html");
+        http_end_headers(fd);
+        close(fd);
+        return;
+    }
+
+    if(S_ISDIR(statbuf.st_mode)) {
+        /* directory */
+        serve_directory(fd,path);
+    }
+    else{
+        /* file */
+        serve_file(fd,path);
+    }
+    
+
 
   /* PART 2 & 3 END */
 
@@ -137,58 +230,112 @@ void handle_files_request(int fd) {
  *
  *   Closes client socket (fd) and proxy target fd (target_fd) when finished.
  */
+struct proxy_args {
+    int fd_in;
+    int fd_out;
+};
+
+static void* proxy_thread(void *args){
+    struct proxy_args* arg = (struct proxy_args*) args;
+    int fd_in = arg->fd_in;
+    int fd_out = arg->fd_out;
+    printf("<proxy_thread> in = %d , out = %d\n",fd_in,fd_out);
+
+    char buffer[BUFSIZ];
+    memset(buffer,0,sizeof(buffer));
+    int read_length=0;
+
+    while((read_length = read(fd_in,buffer,BUFSIZ)) >= 0 ){
+        printf("<1> read_length = %d\n",read_length);
+        fprintf(stderr,"%s\n",buffer);
+        write(fd_out,buffer,read_length);
+    }
+}
+    
+
 void handle_proxy_request(int fd) {
+    //printf("<proxy>\n");
+    /*
+    * The code below does a DNS lookup of server_proxy_hostname and
+    * opens a connection to it. Please do not modify.
+    */
+    struct sockaddr_in target_address;
+    memset(&target_address, 0, sizeof(target_address));
+    target_address.sin_family = AF_INET;
+    target_address.sin_port = htons(server_proxy_port);
 
-  /*
-  * The code below does a DNS lookup of server_proxy_hostname and
-  * opens a connection to it. Please do not modify.
-  */
-  struct sockaddr_in target_address;
-  memset(&target_address, 0, sizeof(target_address));
-  target_address.sin_family = AF_INET;
-  target_address.sin_port = htons(server_proxy_port);
+    // Use DNS to resolve the proxy target's IP address
+    struct hostent* target_dns_entry = gethostbyname2(server_proxy_hostname, AF_INET);
+    // Create an IPv4 TCP socket to communicate with the proxy target.
+    int target_fd = socket(PF_INET, SOCK_STREAM, 0);
+    if (target_fd == -1) {
+        fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno, strerror(errno));
+        close(fd);
+        exit(errno);
+    }
 
-  // Use DNS to resolve the proxy target's IP address
-  struct hostent* target_dns_entry = gethostbyname2(server_proxy_hostname, AF_INET);
+    if (target_dns_entry == NULL) {
+        fprintf(stderr, "Cannot find host: %s\n", server_proxy_hostname);
+        close(target_fd);
+        close(fd);
+        exit(ENXIO);
+    }
+    char* dns_address = target_dns_entry->h_addr_list[0];
 
-  // Create an IPv4 TCP socket to communicate with the proxy target.
-  int target_fd = socket(PF_INET, SOCK_STREAM, 0);
-  if (target_fd == -1) {
-    fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno, strerror(errno));
+    // Connect to the proxy target.
+    memcpy(&target_address.sin_addr, dns_address, sizeof(target_address.sin_addr));
+    int connection_status =
+        connect(target_fd, (struct sockaddr*)&target_address, sizeof(target_address));
+
+    if (connection_status < 0) {
+        /* Dummy request parsing, just to be compliant. */
+        http_request_parse(fd);
+
+        http_start_response(fd, 502);
+        http_send_header(fd, "Content-Type", "text/html");
+        http_end_headers(fd);
+        close(target_fd);
+        close(fd);
+        return;
+    }
+
+    /* TODO: PART 4 */
+    /* PART 4 BEGIN */
+    const int thread_num = 2;
+    //printf("<>> fd = %d , target_fd = %d\n",fd,target_fd);
+    /**/
+        /*
+        if(fcntl(fd,F_GETFL)<0 || fcntl(target_fd,F_GETFL)<0){
+            break;
+        }
+        */
+    pthread_t threads[thread_num];
+    for(int t=0;t<thread_num;t++){
+        struct proxy_args* args = malloc(sizeof(struct proxy_args));
+        if(t==0){
+            args->fd_in = fd;
+            args->fd_out = target_fd;
+        }
+        else{
+            args->fd_in = target_fd;
+            args->fd_out = fd;
+        }
+        if(pthread_create(&threads[t],NULL,proxy_thread,args)){
+            perror("pthread_create");
+            exit(-1);
+        }
+    }
+
+    for(int t=0;t<thread_num;t++){
+        pthread_join(threads[t],NULL);
+    }
+    /* mutiple request unsolved! */
+    
+
     close(fd);
-    exit(errno);
-  }
-
-  if (target_dns_entry == NULL) {
-    fprintf(stderr, "Cannot find host: %s\n", server_proxy_hostname);
     close(target_fd);
-    close(fd);
-    exit(ENXIO);
-  }
 
-  char* dns_address = target_dns_entry->h_addr_list[0];
-
-  // Connect to the proxy target.
-  memcpy(&target_address.sin_addr, dns_address, sizeof(target_address.sin_addr));
-  int connection_status =
-      connect(target_fd, (struct sockaddr*)&target_address, sizeof(target_address));
-
-  if (connection_status < 0) {
-    /* Dummy request parsing, just to be compliant. */
-    http_request_parse(fd);
-
-    http_start_response(fd, 502);
-    http_send_header(fd, "Content-Type", "text/html");
-    http_end_headers(fd);
-    close(target_fd);
-    close(fd);
-    return;
-  }
-
-  /* TODO: PART 4 */
-  /* PART 4 BEGIN */
-
-  /* PART 4 END */
+    /* PART 4 END */
 }
 
 #ifdef POOLSERVER
@@ -228,6 +375,7 @@ void init_thread_pool(int num_threads, void (*request_handler)(int)) {
  * connection, calls request_handler with the accepted fd number.
  */
 void serve_forever(int* socket_number, void (*request_handler)(int)) {
+    
 
   struct sockaddr_in server_address, client_address;
   size_t client_address_length = sizeof(client_address);
@@ -264,6 +412,17 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
 
   /* PART 1 BEGIN */
 
+    
+  if(bind(*socket_number,(struct sockaddr*)&server_address,sizeof(server_address))){
+    perror("bind");
+    exit(errno);
+  } 
+
+  if(listen(*socket_number, 1024)){
+    perror("listen");
+    exit(errno);
+  }
+
   /* PART 1 END */
   printf("Listening on port %d...\n", server_port);
 
@@ -278,14 +437,11 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
   while (1) {
     client_socket_number = accept(*socket_number, (struct sockaddr*)&client_address,
                                   (socklen_t*)&client_address_length);
+    
     if (client_socket_number < 0) {
-      perror("Error accepting socket");
-      continue;
+        perror("Error accepting socket");
+        continue;
     }
-
-    printf("Accepted connection from %s on port %d\n", inet_ntoa(client_address.sin_addr),
-           client_address.sin_port);
-
 #ifdef BASICSERVER
     /*
      * This is a single-process, single-threaded HTTP server.
@@ -310,6 +466,14 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 5 BEGIN */
+    int cpid = fork();
+    if(cpid == 0){
+        /* child */
+        request_handler(client_socket_number);
+        printf("Accepted connection from %s on port %d\n", inet_ntoa(client_address.sin_addr),
+           client_address.sin_port);
+        exit(-1);
+    }
 
     /* PART 5 END */
 
@@ -325,6 +489,14 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 6 BEGIN */
+    pthread_t thread;
+    struct thread_server_args* args =(struct thread_server_args*) malloc(sizeof(struct thread_server_args));
+    args->request_handler = request_handler;
+    args->fd = client_socket_number; 
+    if(pthread_create(&thread,NULL,thread_server,(void*)args)){
+        perror("pthread_create");
+        exit(-1);
+    }
 
     /* PART 6 END */
 #elif POOLSERVER
@@ -340,6 +512,11 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
 
     /* PART 7 END */
 #endif
+    
+    
+
+    printf("Accepted connection from %s on port %d\n", inet_ntoa(client_address.sin_addr),
+           client_address.sin_port);
   }
 
   shutdown(*socket_number, SHUT_RDWR);
